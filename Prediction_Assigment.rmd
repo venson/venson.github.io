@@ -1,0 +1,182 @@
+---
+title: "Prediction model for personal activity"
+subtitle: "Prediction Assignment Writeup"
+author: "huangwenxuan"
+date: "3/11/2021"
+output: html_document
+---
+
+
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Overview
+The data is from the accelerometers on the belt, forearm, arm, and dumbell of 6 participants. 
+
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions:
+
+1. exactly according to the specification (Class A)
+2. Throwing the elbows to the front (Class B)
+3. lifting the dumbbell only halfway (Class C)
+4. lowering the dumbbell only halfway (Class D) 
+5. throwing the hips to the front (Class E).
+
+We can make the blind guess that, the fashions have a clear pattern and can be modeled.
+The tree model may perform better.
+
+
+# Data clean and explore
+```{r getdata}
+library(ggplot2)
+library(caret)
+training_file_url <-
+  "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testing_file_url <-
+  "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if (!file.exists("data/pml-training.csv")) {
+  download.file(url = training_file_url, destfile = "data/pml-training.csv")
+}
+if (!file.exists("data/pml-testing.csv")) {
+  download.file(url = testing_file_url, destfile = "data/pml-testing.csv")
+}
+
+training_data_orig <- read.csv("data/pml-training.csv")
+testing_data_orig <- read.csv("data/pml-testing.csv")
+dim(training_data_orig)
+```
+
+### 1. Clean data and remove NAs
+
+we will take a look of the data, find out whether there are many NAs.
+```{r}
+train_na <- apply(is.na(training_data_orig), 2, sum)
+summary(train_na)
+```
+
+Does these information important, or can we remove the NAs?
+Does the avaiable of certain information can directly predict the class of activity?
+
+```{r}
+dim(training_data_orig)[1] - max(train_na)
+(dim(training_data_orig)[1] - max(train_na)) / dim(training_data_orig)[1]
+table(training_data_orig$classe)
+```
+
+The number of the non-NA row is much less than the row of each type of activity.
+The portion of the non-NA data is only 2.1%, so we can remove these colums
+```{r}
+training_data_nonna <- training_data_orig[, ! (train_na != 0)]
+testing_data_nonna <- testing_data_orig[, ! (train_na != 0)]
+dim(training_data_nonna)
+```
+### 2. clean near zero variance data
+```{r}
+nzv <- nearZeroVar(training_data_nonna)
+training_data <- training_data_nonna[, -nzv]
+testing_data <- testing_data_nonna[, -nzv]
+```
+
+### 3. remove useless information 
+
+I ran into problems without this step, which may cause 100% accuracy.
+```{r}
+training_data <- training_data[, -c(1:6)]
+testing_data <- testing_data[, -c(1:6)]
+```
+
+# Model fit and selection
+
+Model fit need a lot of compution. We will use parallel processing during trainning.
+```{r parallel}
+library(doParallel)
+# my computer got 4 cores
+cl <- makePSOCKcluster(4)
+```
+
+### 1. data split
+```{r}
+set.seed(123)
+in_train <- createDataPartition(y = training_data$classe,
+                                p = 0.75, list = FALSE)
+training <- training_data[in_train, ]
+testing <- training_data[-in_train, ]
+```
+
+### 2. Random forest model
+The outcome of the prediction are 5 types, random forest may perform best.
+```{r rdm fit}
+set.seed(12345)
+## run model fit in parallel
+registerDoParallel(cl)
+rffit <- train(classe ~ .,
+               data = training,
+               method = "rf",
+               trControl = trainControl(method = "cv",
+                                        number = 3),
+               verboseIter = FALSE)
+## disable parallel after train
+
+predict_rf_test <- predict(rffit, newdata = testing)
+confusionMatrix(predict_rf_test, factor(testing$classe))
+```
+
+### 3. Grandient boosted model
+
+```{r gbm fit, results = "hide"}
+set.seed(12345)
+gbmfit <- train(classe ~ .,
+               data = training,
+               method = "gbm",
+               trControl = trainControl(method = "cv",
+                                        number = 3),
+                verbose = FALSE)
+predict_gbm_test <- predict(gbmfit, newdata = testing)
+```
+
+```{r}
+confusionMatrix(predict_gbm_test, factor(testing$classe))
+```
+
+### 4. linear discriminant analysis
+```{r lda fit}
+## run model fit in parallel
+
+ldafit <- train(classe ~ .,
+                data = training,
+                method = "lda",
+                trControl = trainControl(method = "CV",
+                                         number = 5),
+                verbose = FALSE)
+predict_lda_test <- predict(ldafit, newdata = testing)
+confusionMatrix(predict_lda_test, factor(testing$classe))
+```
+
+### 5. Recursive partitioning and regression trees
+
+```{r rpart fit}
+rpartfit <- train(classe ~ .,
+                data = training,
+                method = "rpart",
+                trControl = trainControl(method = "cv"),
+                tuneGrid = data.frame(cp = 0.01))
+predict_rpart_test <- predict(rpartfit, newdata = testing)
+confusionMatrix(predict_rpart_test, factor(testing$classe))
+```
+
+# Conclution 
+
+Comparing the models above, we can see that
+
+1. Boosting did increase the accuracy a lot.
+2. regression tree have better accuracy than linear discriminant.
+
+Random forest got the best accuracy in this model.
+We will use the random forest model with the data from "pml-testing.csv" to generate 20 predicts.
+
+```{r}
+predict_rf_finaltest <- predict(rffit, newdata = testing_data)
+names(predict_rf_finaltest) <- testing_data$problem_id
+predict_rf_finaltest
+stopCluster(cl)
+```
